@@ -94,7 +94,7 @@ export function EfficiencyMapWidget({ data }: { data: EfficiencyMapData }) {
                 );
               }}
             />
-            {groups.map((group) => (
+            {groups.map((group, i) => (
               <Scatter
                 key={group.key}
                 name={group.label}
@@ -103,6 +103,10 @@ export function EfficiencyMapWidget({ data }: { data: EfficiencyMapData }) {
                 fillOpacity={0.78}
                 stroke={group.color}
                 strokeWidth={0.5}
+                isAnimationActive
+                animationDuration={900}
+                animationBegin={350 + i * 140}
+                animationEasing="ease-out"
               />
             ))}
           </ScatterChart>

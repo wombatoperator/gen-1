@@ -1,5 +1,8 @@
+'use client';
+
 import { WidgetShell } from '@/components/ui/widget-shell';
 import { fmt, HUE } from '@/lib/format';
+import { useMounted } from '@/lib/animation';
 
 type AudienceCard = {
   label: string;
@@ -22,6 +25,7 @@ type AudienceMixData = {
 export function AudienceMixWidget({ data }: { data: AudienceMixData }) {
   const totalImpr = data.cards.reduce((sum, card) => sum + card.impressions, 0);
   const purple = HUE.purple;
+  const mounted = useMounted();
 
   return (
     <WidgetShell
@@ -32,10 +36,13 @@ export function AudienceMixWidget({ data }: { data: AudienceMixData }) {
       <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-[var(--color-rule-soft)]">
         {data.cards.map((card, i) => {
           const share = totalImpr > 0 ? card.impressions / totalImpr : 0;
+          // Bars grow on mount with a per-card delay so they cascade.
+          const targetWidth = `${Math.max(3, share * 100)}%`;
           return (
             <div
               key={card.label}
-              className={`relative px-5 py-4 ${i >= 2 ? 'sm:border-t border-[var(--color-rule-soft)]' : ''}`}
+              className={`relative px-5 py-4 ${i >= 2 ? 'sm:border-t border-[var(--color-rule-soft)]' : ''} animate-[fadeUp_500ms_cubic-bezier(0.2,0.7,0.2,1)_both]`}
+              style={{ animationDelay: `${250 + i * 80}ms` }}
             >
               <div className="flex items-baseline justify-between gap-3">
                 <div className="text-[13.5px] font-medium text-[var(--color-ink)] truncate" title={card.label}>
@@ -60,8 +67,12 @@ export function AudienceMixWidget({ data }: { data: AudienceMixData }) {
               </div>
               <div className="mt-2 h-1.5 w-full rounded-full overflow-hidden" style={{ backgroundColor: purple.soft }}>
                 <div
-                  className="h-full rounded-full"
-                  style={{ width: `${Math.max(3, share * 100)}%`, backgroundColor: purple.solid }}
+                  className="h-full rounded-full transition-[width] duration-[1100ms] ease-out"
+                  style={{
+                    width: mounted ? targetWidth : '0%',
+                    backgroundColor: purple.solid,
+                    transitionDelay: `${400 + i * 80}ms`,
+                  }}
                 />
               </div>
             </div>

@@ -87,7 +87,16 @@ export function BreakdownWidget({ data }: { data: BreakdownData }) {
               tickFormatter={(v: string) => (v.length > 22 ? `${v.slice(0, 21)}…` : v)}
             />
             <ChartTooltip formatter={(value) => formatMetric(data.metric, value)} />
-            <Bar dataKey="value" fill={barColor} radius={[0, 4, 4, 0]} barSize={16} />
+            <Bar
+              dataKey="value"
+              fill={barColor}
+              radius={[0, 4, 4, 0]}
+              barSize={16}
+              isAnimationActive
+              animationDuration={1100}
+              animationBegin={300}
+              animationEasing="ease-out"
+            />
           </BarChart>
         </ChartContainer>
       </div>

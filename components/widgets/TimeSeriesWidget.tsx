@@ -96,6 +96,10 @@ export function TimeSeriesWidget({ data }: { data: TimeSeriesData }) {
                 fill={`url(#ts-fill-${data.datasetId})`}
                 dot={false}
                 activeDot={{ r: 4, fill: primary, stroke: 'white', strokeWidth: 2 }}
+                isAnimationActive
+                animationDuration={1200}
+                animationBegin={250}
+                animationEasing="ease-out"
               />
             </AreaChart>
           ) : (
@@ -126,6 +130,10 @@ export function TimeSeriesWidget({ data }: { data: TimeSeriesData }) {
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 4, fill: seriesColor(i), stroke: 'white', strokeWidth: 2 }}
+                  isAnimationActive
+                  animationDuration={1200}
+                  animationBegin={250 + i * 120}
+                  animationEasing="ease-out"
                 />
               ))}
             </LineChart>

@@ -110,6 +110,33 @@ body {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* Widget entrance — premium "lands and resolves" effect. The card slides up with
+   a subtle scale and defocus, then sharpens. Designed to play once per mount. */
+@keyframes enterWidget {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+    filter: blur(6px);
+  }
+  55% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* Subtle accent gradient sweep across the widget border on entrance — like a
+   highlight catching the edge of a card. Pure decoration, fades after one pass. */
+@keyframes edgeGleam {
+  0% { background-position: -200% 0; opacity: 0; }
+  35% { opacity: 0.8; }
+  100% { background-position: 200% 0; opacity: 0; }
+}
+
 /* Respect motion preferences */
 @media (prefers-reduced-motion: reduce) {
   *, ::before, ::after {
