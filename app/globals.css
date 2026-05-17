@@ -84,6 +84,12 @@ body {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
 }
+
+/* Subtle entrance — used for the empty-state hero and the dataset cards (staggered) */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 .shimmer {
   position: relative;
   overflow: hidden;
