@@ -90,6 +90,34 @@ body {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Editorial reveal for eyebrows — wipes in like a curtain lifting */
+@keyframes reveal {
+  from { opacity: 0; letter-spacing: 0.18em; transform: translateY(4px); }
+  to   { opacity: 1; letter-spacing: 0.12em; transform: translateY(0); }
+}
+
+/* Settles in with a slight defocus → focus — for the italic phrase in the hero */
+@keyframes settleIn {
+  0%   { opacity: 0; filter: blur(8px); transform: translateY(6px); }
+  60%  { opacity: 1; }
+  100% { opacity: 1; filter: blur(0); transform: translateY(0); }
+}
+
+/* Header slides down on first paint */
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Respect motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 .shimmer {
   position: relative;
   overflow: hidden;

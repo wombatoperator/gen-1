@@ -139,8 +139,8 @@ function DatasetCard({
       type="button"
       onClick={onSelect}
       disabled={disabled}
-      style={{ animationDelay: `${index * 40}ms` }}
-      className="group relative text-left rounded-xl border border-[var(--color-rule)] bg-[var(--color-canvas-raised)] px-5 py-4 transition-[transform,box-shadow,border-color] duration-300 ease-out hover:-translate-y-0.5 hover:border-[var(--color-rule-strong)] hover:shadow-[var(--shadow-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 animate-[fadeUp_400ms_ease-out_both]"
+      style={{ animationDelay: `${980 + index * 60}ms` }}
+      className="group relative text-left rounded-xl border border-[var(--color-rule)] bg-[var(--color-canvas-raised)] px-5 py-4 transition-[transform,box-shadow,border-color] duration-300 ease-out hover:-translate-y-0.5 hover:border-[var(--color-rule-strong)] hover:shadow-[var(--shadow-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 animate-[fadeUp_500ms_cubic-bezier(0.2,0.7,0.2,1)_both]"
     >
       <div className="flex items-start gap-3">
         <span className="flex items-center justify-center shrink-0 w-9 h-9 rounded-md bg-[var(--color-accent)] text-[var(--color-canvas-raised)] font-mono text-[11px] tracking-tight">
@@ -201,6 +201,7 @@ export default function Page() {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const prevMessageCountRef = useRef(0);
 
   const { messages, status, sendMessage, setMessages } = useChat<ChatMessage>({
     transport: new DefaultChatTransport({ api: '/api/chat' }),
@@ -209,10 +210,31 @@ export default function Page() {
   const isEmpty = messages.length === 0;
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (!el) return;
+
+    // Empty state: do nothing. No reason to scroll a landing page to its bottom.
+    if (messages.length === 0) {
+      prevMessageCountRef.current = 0;
+      return;
     }
-  }, [messages.length, status]);
+
+    const newMessageArrived = messages.length > prevMessageCountRef.current;
+    prevMessageCountRef.current = messages.length;
+
+    if (newMessageArrived) {
+      // New turn — always pin to bottom so the user sees their input and the response.
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      return;
+    }
+
+    // Same turn streaming in — only follow along if the user was already near the
+    // bottom. If they've scrolled up to read a prior widget, do not yank them back.
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 120) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    }
+  }, [messages, status]);
 
   const send = (text: string) => {
     if (!text.trim() || isActive) return;
@@ -254,7 +276,7 @@ export default function Page() {
 
 function Header({ isEmpty, onHome, disabled }: { isEmpty: boolean; onHome: () => void; disabled: boolean }) {
   return (
-    <header className="px-8 py-5 border-b border-[var(--color-rule)] bg-[var(--color-canvas-raised)]/85 backdrop-blur-md shrink-0">
+    <header className="px-8 py-5 border-b border-[var(--color-rule)] bg-[var(--color-canvas-raised)]/85 backdrop-blur-md shrink-0 animate-[slideDown_600ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
       <div className="max-w-6xl mx-auto flex items-center justify-between gap-6">
         <button
           type="button"
@@ -337,23 +359,31 @@ function ConversationView({ messages, isActive }: { messages: ChatMessage[]; isA
 function EmptyState({ onSelect, disabled }: { onSelect: (prompt: string) => void; disabled: boolean }) {
   return (
     <div className="max-w-6xl mx-auto px-6 sm:px-10 pt-16 pb-12">
-      <div className="max-w-3xl animate-[fadeUp_500ms_ease-out_both]">
-        <div className="eyebrow text-[10px]">generative ui for advertising data</div>
+      <div className="max-w-3xl">
+        <div className="eyebrow text-[10px] animate-[reveal_700ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+          generative ui for advertising data
+        </div>
         <h1 className="mt-4 text-[clamp(34px,5vw,52px)] leading-[1.04] tracking-[-0.02em] text-[var(--color-ink)]">
-          Talk to your ad data.{' '}
-          <span className="font-display italic text-[var(--color-ink-soft)]">
+          <span className="inline-block animate-[fadeUp_700ms_120ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+            Talk to your ad data.{' '}
+          </span>
+          <span
+            className="font-display italic text-[var(--color-ink-soft)] inline-block animate-[settleIn_900ms_320ms_cubic-bezier(0.2,0.7,0.2,1)_both]"
+          >
             Render typed components
-          </span>{' '}
-          instead of text walls.
+          </span>
+          <span className="inline-block animate-[fadeUp_700ms_540ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+            {' '}instead of text walls.
+          </span>
         </h1>
-        <p className="mt-5 text-[15px] leading-relaxed text-[var(--color-ink-muted)] max-w-[58ch]">
+        <p className="mt-5 text-[15px] leading-relaxed text-[var(--color-ink-muted)] max-w-[58ch] animate-[fadeUp_700ms_680ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
           Pick a sample export below. The agent normalizes the CSV into a canonical schema,
           then composes a report by calling React components as tools — only the ones that
           actually answer your question.
         </p>
       </div>
 
-      <div className="mt-12">
+      <div className="mt-12 animate-[fadeUp_700ms_820ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
         <div className="flex items-baseline justify-between mb-4">
           <div className="eyebrow text-[10px]">sample datasets</div>
           <div className="text-[11px] text-[var(--color-ink-faint)] tabular-nums">
@@ -373,7 +403,7 @@ function EmptyState({ onSelect, disabled }: { onSelect: (prompt: string) => void
         </div>
       </div>
 
-      <footer className="mt-16 pt-6 border-t border-[var(--color-rule-soft)]">
+      <footer className="mt-16 pt-6 border-t border-[var(--color-rule-soft)] animate-[fadeUp_700ms_1100ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
         <div className="flex flex-wrap items-center justify-between gap-y-3 gap-x-6 text-[11px] text-[var(--color-ink-muted)]">
           <div className="flex items-center gap-2">
             <span className="font-mono uppercase tracking-[0.14em] text-[var(--color-ink-faint)]">v0</span>
