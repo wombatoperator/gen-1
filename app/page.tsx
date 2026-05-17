@@ -11,9 +11,12 @@ import { AudienceMixWidget } from '@/components/widgets/AudienceMixWidget';
 import { EfficiencyMapWidget } from '@/components/widgets/EfficiencyMapWidget';
 import { QueryResultView } from '@/components/QueryResult';
 import { ChatProse } from '@/components/ChatProse';
+import { PlainProse } from '@/components/PlainProse';
 import { DATASET_CATALOG } from '@/lib/dataset-catalog';
 import { PLATFORM_LABELS } from '@/lib/format';
 import type { ChatMessage } from '@/ai/tools';
+
+type ChatHandle = ReturnType<typeof useChat<ChatMessage>>;
 
 const PLATFORM_GLYPH: Record<string, string> = {
   meta: 'M',
@@ -25,7 +28,46 @@ const PLATFORM_GLYPH: Record<string, string> = {
 };
 
 function buildDatasetPrompt(dataset: (typeof DATASET_CATALOG)[number]): string {
-  return `Analyze the "${dataset.label}" dataset (id: ${dataset.id}). Pick the most useful widgets — do not render all of them.`;
+  return `Analyze the "${dataset.label}" dataset (${dataset.id}).`;
+}
+
+// Match the elegant short form emitted by buildDatasetPrompt and resolve back
+// to the catalog entry. If the id doesn't exist (user typed something weird),
+// return null and we fall back to the normal text bubble.
+const DATASET_PICK_RE = /^Analyze the "([^"]+)" dataset \(([a-z0-9_]+)\)\.?\s*$/;
+function parseDatasetPick(text: string): (typeof DATASET_CATALOG)[number] | null {
+  const match = text.match(DATASET_PICK_RE);
+  if (!match) return null;
+  return DATASET_CATALOG.find((dataset) => dataset.id === match[2]) ?? null;
+}
+
+function asDatasetPick(message: ChatMessage): (typeof DATASET_CATALOG)[number] | null {
+  if (message.role !== 'user') return null;
+  if (message.parts.length !== 1) return null;
+  const part = message.parts[0];
+  if (part.type !== 'text') return null;
+  return parseDatasetPick(part.text);
+}
+
+function DatasetPickChip({ dataset }: { dataset: (typeof DATASET_CATALOG)[number] }) {
+  const platformLabel = PLATFORM_LABELS[dataset.platform] ?? dataset.platform;
+  return (
+    <div className="relative inline-flex items-center gap-3 rounded-xl border border-[var(--color-rule)] bg-[var(--color-canvas-raised)] pl-2 pr-4 py-2 shadow-[var(--shadow-card)] overflow-hidden animate-[chipIn_420ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+      <span className="pointer-events-none absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-[var(--color-canvas-sunken)] to-transparent animate-[chipSweep_900ms_180ms_cubic-bezier(0.2,0.7,0.2,1)_both]" />
+      <span className="relative flex items-center justify-center w-8 h-8 rounded-md bg-[var(--color-accent)] text-[var(--color-canvas-raised)] font-mono text-[10.5px] tracking-tight animate-[glyphKick_500ms_120ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+        {PLATFORM_GLYPH[dataset.platform] ?? dataset.platform.slice(0, 2).toUpperCase()}
+      </span>
+      <div className="relative flex flex-col gap-0.5 min-w-0">
+        <span className="eyebrow text-[9px] leading-none">analyze</span>
+        <span className="text-[13.5px] font-medium text-[var(--color-ink)] leading-tight truncate">
+          {dataset.label}
+        </span>
+      </div>
+      <span className="relative ml-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-ink-faint)] tabular-nums">
+        {platformLabel}
+      </span>
+    </div>
+  );
 }
 
 function ToolPending({ label }: { label: string }) {
@@ -122,6 +164,22 @@ function MessagePart({ part }: { part: ChatMessage['parts'][number] }) {
   return null;
 }
 
+function PlainMessagePart({ part }: { part: ChatMessage['parts'][number] }) {
+  if (part.type === 'text') return part.text.trim() ? <PlainProse text={part.text} /> : null;
+  if (part.type === 'tool-listDatasets') return null;
+  if (part.type === 'tool-loadDataset') {
+    if (part.state === 'input-streaming' || part.state === 'input-available') return <ToolPending label="loading dataset" />;
+    if (part.state === 'output-error') return <ToolFailed message={part.errorText} />;
+    return null;
+  }
+  if (part.type === 'tool-queryDataset') {
+    if (part.state === 'input-streaming' || part.state === 'input-available') return <ToolPending label="querying dataset" />;
+    if (part.state === 'output-error') return <ToolFailed message={part.errorText} />;
+    return null;
+  }
+  return null;
+}
+
 function DatasetCard({
   dataset,
   index,
@@ -197,69 +255,113 @@ const SUGGESTED_PROMPTS = [
   'Where am I burning budget at high CPC?',
 ];
 
-export default function Page() {
-  const [input, setInput] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const prevMessageCountRef = useRef(0);
-
-  const { messages, status, sendMessage, setMessages } = useChat<ChatMessage>({
-    transport: new DefaultChatTransport({ api: '/api/chat' }),
-  });
-  const isActive = status === 'submitted' || status === 'streaming';
-  const isEmpty = messages.length === 0;
-
+function useAutoScroll(
+  ref: React.RefObject<HTMLDivElement | null>,
+  messages: ChatMessage[],
+  status: string,
+  enabled: boolean,
+) {
+  const prevCountRef = useRef(0);
   useEffect(() => {
-    const el = scrollRef.current;
+    if (!enabled) return;
+    const el = ref.current;
     if (!el) return;
-
-    // Empty state: do nothing. No reason to scroll a landing page to its bottom.
     if (messages.length === 0) {
-      prevMessageCountRef.current = 0;
+      prevCountRef.current = 0;
       return;
     }
-
-    const newMessageArrived = messages.length > prevMessageCountRef.current;
-    prevMessageCountRef.current = messages.length;
-
+    const newMessageArrived = messages.length > prevCountRef.current;
+    prevCountRef.current = messages.length;
     if (newMessageArrived) {
-      // New turn — always pin to bottom so the user sees their input and the response.
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
       return;
     }
-
-    // Same turn streaming in — only follow along if the user was already near the
-    // bottom. If they've scrolled up to read a prior widget, do not yank them back.
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distanceFromBottom < 120) {
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     }
-  }, [messages, status]);
+  }, [ref, messages, status, enabled]);
+}
+
+export default function Page() {
+  const [input, setInput] = useState('');
+  const [demoMode, setDemoMode] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const textScrollRef = useRef<HTMLDivElement>(null);
+  const uiScrollRef = useRef<HTMLDivElement>(null);
+
+  const uiChat = useChat<ChatMessage>({
+    transport: new DefaultChatTransport({ api: '/api/chat' }),
+  });
+  const textChat = useChat<ChatMessage>({
+    transport: new DefaultChatTransport({ api: '/api/chat', body: { mode: 'text' } }),
+  });
+
+  const uiActive = uiChat.status === 'submitted' || uiChat.status === 'streaming';
+  const textActive = textChat.status === 'submitted' || textChat.status === 'streaming';
+  const isActive = demoMode ? uiActive || textActive : uiActive;
+  const isEmpty = demoMode
+    ? uiChat.messages.length === 0 && textChat.messages.length === 0
+    : uiChat.messages.length === 0;
+
+  useAutoScroll(scrollRef, uiChat.messages, uiChat.status, !demoMode);
+  useAutoScroll(uiScrollRef, uiChat.messages, uiChat.status, demoMode);
+  useAutoScroll(textScrollRef, textChat.messages, textChat.status, demoMode);
 
   const send = (text: string) => {
     if (!text.trim() || isActive) return;
-    sendMessage({ text });
+    if (demoMode) {
+      textChat.sendMessage({ text });
+      uiChat.sendMessage({ text });
+    } else {
+      uiChat.sendMessage({ text });
+    }
     setInput('');
     inputRef.current?.focus();
   };
 
   const resetToHome = () => {
     if (isActive) return;
-    setMessages([]);
+    uiChat.setMessages([]);
+    textChat.setMessages([]);
     setInput('');
+  };
+
+  const toggleDemoMode = () => {
+    if (isActive) return;
+    uiChat.setMessages([]);
+    textChat.setMessages([]);
+    setInput('');
+    setDemoMode((prev) => !prev);
   };
 
   return (
     <div className="flex flex-col h-screen">
-      <Header isEmpty={isEmpty} onHome={resetToHome} disabled={isActive} />
+      <Header
+        isEmpty={isEmpty}
+        onHome={resetToHome}
+        disabled={isActive}
+        demoMode={demoMode}
+        onToggleDemo={toggleDemoMode}
+      />
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-quiet">
-        {isEmpty ? (
-          <EmptyState onSelect={send} disabled={isActive} />
-        ) : (
-          <ConversationView messages={messages} isActive={isActive} />
-        )}
-      </div>
+      {demoMode && !isEmpty ? (
+        <SplitConversation
+          textChat={textChat}
+          uiChat={uiChat}
+          textScrollRef={textScrollRef}
+          uiScrollRef={uiScrollRef}
+        />
+      ) : (
+        <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-quiet">
+          {isEmpty ? (
+            <EmptyState onSelect={send} disabled={isActive} demoMode={demoMode} />
+          ) : (
+            <ConversationView messages={uiChat.messages} isActive={uiActive} />
+          )}
+        </div>
+      )}
 
       <Composer
         isEmpty={isEmpty}
@@ -274,7 +376,153 @@ export default function Page() {
   );
 }
 
-function Header({ isEmpty, onHome, disabled }: { isEmpty: boolean; onHome: () => void; disabled: boolean }) {
+function SplitConversation({
+  textChat,
+  uiChat,
+  textScrollRef,
+  uiScrollRef,
+}: {
+  textChat: ChatHandle;
+  uiChat: ChatHandle;
+  textScrollRef: React.RefObject<HTMLDivElement | null>;
+  uiScrollRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const textActive = textChat.status === 'submitted' || textChat.status === 'streaming';
+  const uiActive = uiChat.status === 'submitted' || uiChat.status === 'streaming';
+
+  return (
+    <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2">
+      <PaneColumn
+        eyebrow="without gen-1"
+        title="Plain text chatbot"
+        note="Same model · data tools only · no UI components"
+        dotColor="var(--color-data-red)"
+        bordered
+        scrollRef={textScrollRef}
+        tint="bg-[var(--color-canvas-sunken)]/50"
+      >
+        <PlainConversation messages={textChat.messages} isActive={textActive} />
+      </PaneColumn>
+      <PaneColumn
+        eyebrow="with gen-1"
+        title="Generative UI"
+        note="Same model · renders typed React components as tools"
+        dotColor="var(--color-data-green)"
+        scrollRef={uiScrollRef}
+        tint=""
+      >
+        <ConversationView messages={uiChat.messages} isActive={uiActive} />
+      </PaneColumn>
+    </div>
+  );
+}
+
+function PaneColumn({
+  eyebrow,
+  title,
+  note,
+  dotColor,
+  bordered,
+  scrollRef,
+  tint,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  note: string;
+  dotColor: string;
+  bordered?: boolean;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  tint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`flex flex-col min-h-0 ${bordered ? 'lg:border-r border-b lg:border-b-0 border-[var(--color-rule)]' : ''}`}
+    >
+      <div className="shrink-0 px-6 sm:px-8 py-3 border-b border-[var(--color-rule)] bg-[var(--color-canvas-raised)]/85 backdrop-blur-md">
+        <div className="flex items-baseline justify-between gap-4">
+          <div className="flex items-baseline gap-2.5 min-w-0">
+            <span
+              className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+              style={{ background: dotColor }}
+            />
+            <span className="eyebrow text-[9.5px]">{eyebrow}</span>
+            <span className="text-[13px] font-medium text-[var(--color-ink)] truncate">{title}</span>
+          </div>
+          <span className="hidden md:inline text-[10.5px] text-[var(--color-ink-faint)] truncate">{note}</span>
+        </div>
+      </div>
+      <div ref={scrollRef} className={`flex-1 overflow-y-auto scroll-quiet ${tint}`}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PlainConversation({ messages, isActive }: { messages: ChatMessage[]; isActive: boolean }) {
+  return (
+    <div className="max-w-3xl mx-auto px-6 sm:px-8 py-8 space-y-8">
+      {messages.map((message) => {
+        const pick = asDatasetPick(message);
+        if (pick) {
+          return (
+            <div key={message.id} className="flex">
+              <DatasetPickChip dataset={pick} />
+            </div>
+          );
+        }
+        return (
+          <div key={message.id} className="flex gap-3">
+            <div className="shrink-0 w-6 mt-0.5">
+              {message.role === 'user' ? (
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-accent)] text-[var(--color-canvas-raised)] font-mono text-[9px] uppercase tracking-tight">
+                  You
+                </span>
+              ) : (
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-canvas-raised)] border border-[var(--color-rule)] font-mono text-[10px] text-[var(--color-ink-muted)]">
+                  AI
+                </span>
+              )}
+            </div>
+            <div className="flex-1 min-w-0 space-y-2">
+              <div className="eyebrow text-[9px]">{message.role === 'user' ? 'You' : 'Assistant'}</div>
+              {message.parts.map((part, i) => (
+                <PlainMessagePart key={i} part={part} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {isActive && messages[messages.length - 1]?.role === 'user' && (
+        <div className="flex gap-3">
+          <div className="shrink-0 w-6">
+            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-canvas-raised)] border border-[var(--color-rule)] font-mono text-[10px] text-[var(--color-ink-muted)]">
+              AI
+            </span>
+          </div>
+          <div className="flex-1">
+            <ToolPending label="thinking" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Header({
+  isEmpty,
+  onHome,
+  disabled,
+  demoMode,
+  onToggleDemo,
+}: {
+  isEmpty: boolean;
+  onHome: () => void;
+  disabled: boolean;
+  demoMode: boolean;
+  onToggleDemo: () => void;
+}) {
   return (
     <header className="px-8 py-5 border-b border-[var(--color-rule)] bg-[var(--color-canvas-raised)]/85 backdrop-blur-md shrink-0 animate-[slideDown_600ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
       <div className="max-w-6xl mx-auto flex items-center justify-between gap-6">
@@ -297,48 +545,99 @@ function Header({ isEmpty, onHome, disabled }: { isEmpty: boolean; onHome: () =>
             </span>
           )}
         </button>
-        <div className="hidden md:flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-ink-muted)]">
-          <a
-            href="https://github.com/wombatoperator/gen-1"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 hover:text-[var(--color-ink)] transition-colors"
-          >
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-data-green)]" />
-            open source
-          </a>
-          <span className="text-[var(--color-rule-strong)]">·</span>
-          <span>AI SDK v6</span>
+        <div className="flex items-center gap-3">
+          <DemoModeToggle active={demoMode} disabled={disabled} onToggle={onToggleDemo} />
+          <div className="hidden md:flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-ink-muted)]">
+            <a
+              href="https://github.com/wombatoperator/gen-1"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 hover:text-[var(--color-ink)] transition-colors"
+            >
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-data-green)]" />
+              open source
+            </a>
+            <span className="text-[var(--color-rule-strong)]">·</span>
+            <span>AI SDK v6</span>
+          </div>
         </div>
       </div>
     </header>
   );
 }
 
+function DemoModeToggle({
+  active,
+  disabled,
+  onToggle,
+}: {
+  active: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={disabled}
+      aria-pressed={active}
+      title={active ? 'Exit side-by-side demo mode' : 'Compare plain text vs generative UI side-by-side'}
+      className={`group inline-flex items-center gap-2 rounded-full pl-1.5 pr-3 py-1 text-[11px] tracking-[0.04em] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        active
+          ? 'bg-[var(--color-accent)] text-[var(--color-canvas-raised)] hover:bg-[var(--color-accent-soft)]'
+          : 'border border-[var(--color-rule)] bg-[var(--color-canvas-raised)] text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] hover:bg-[var(--color-canvas-sunken)]'
+      }`}
+    >
+      <span
+        className={`relative inline-flex items-center w-7 h-4 rounded-full transition-colors ${
+          active ? 'bg-[var(--color-data-green)]' : 'bg-[var(--color-rule-strong)]'
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 w-3 h-3 rounded-full bg-[var(--color-canvas-raised)] shadow-sm transition-transform ${
+            active ? 'translate-x-3.5' : 'translate-x-0.5'
+          }`}
+        />
+      </span>
+      <span className="font-medium">Demo mode</span>
+    </button>
+  );
+}
+
 function ConversationView({ messages, isActive }: { messages: ChatMessage[]; isActive: boolean }) {
   return (
     <div className="max-w-6xl mx-auto px-6 sm:px-10 py-10 space-y-10">
-      {messages.map((message) => (
-        <div key={message.id} className="flex gap-4">
-          <div className="shrink-0 w-7 mt-0.5">
-            {message.role === 'user' ? (
-              <span className="flex items-center justify-center w-7 h-7 rounded-full bg-[var(--color-accent)] text-[var(--color-canvas-raised)] font-mono text-[10px] uppercase tracking-tight">
-                You
-              </span>
-            ) : (
-              <span className="flex items-center justify-center w-7 h-7 rounded-full bg-[var(--color-canvas-sunken)] border border-[var(--color-rule)] font-display italic text-[14px] text-[var(--color-ink)]">
-                g
-              </span>
-            )}
+      {messages.map((message) => {
+        const pick = asDatasetPick(message);
+        if (pick) {
+          return (
+            <div key={message.id} className="flex">
+              <DatasetPickChip dataset={pick} />
+            </div>
+          );
+        }
+        return (
+          <div key={message.id} className="flex gap-4">
+            <div className="shrink-0 w-7 mt-0.5">
+              {message.role === 'user' ? (
+                <span className="flex items-center justify-center w-7 h-7 rounded-full bg-[var(--color-accent)] text-[var(--color-canvas-raised)] font-mono text-[10px] uppercase tracking-tight">
+                  You
+                </span>
+              ) : (
+                <span className="flex items-center justify-center w-7 h-7 rounded-full bg-[var(--color-canvas-sunken)] border border-[var(--color-rule)] font-display italic text-[14px] text-[var(--color-ink)]">
+                  g
+                </span>
+              )}
+            </div>
+            <div className="flex-1 min-w-0 space-y-3">
+              <div className="eyebrow text-[9.5px]">{message.role === 'user' ? 'You' : 'gen-1'}</div>
+              {message.parts.map((part, i) => (
+                <MessagePart key={i} part={part} />
+              ))}
+            </div>
           </div>
-          <div className="flex-1 min-w-0 space-y-3">
-            <div className="eyebrow text-[9.5px]">{message.role === 'user' ? 'You' : 'gen-1'}</div>
-            {message.parts.map((part, i) => (
-              <MessagePart key={i} part={part} />
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
 
       {isActive && messages[messages.length - 1]?.role === 'user' && (
         <div className="flex gap-4">
@@ -356,30 +655,50 @@ function ConversationView({ messages, isActive }: { messages: ChatMessage[]; isA
   );
 }
 
-function EmptyState({ onSelect, disabled }: { onSelect: (prompt: string) => void; disabled: boolean }) {
+function EmptyState({
+  onSelect,
+  disabled,
+  demoMode,
+}: {
+  onSelect: (prompt: string) => void;
+  disabled: boolean;
+  demoMode: boolean;
+}) {
   return (
     <div className="max-w-6xl mx-auto px-6 sm:px-10 pt-16 pb-12">
       <div className="max-w-3xl">
         <div className="eyebrow text-[10px] animate-[reveal_700ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
-          generative ui for advertising data
+          {demoMode ? 'side-by-side demo · plain text vs generative ui' : 'generative ui for advertising data'}
         </div>
-        <h1 className="mt-4 text-[clamp(34px,5vw,52px)] leading-[1.04] tracking-[-0.02em] text-[var(--color-ink)]">
-          <span className="inline-block animate-[fadeUp_700ms_120ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
-            Talk to your ad data.{' '}
-          </span>
-          <span
-            className="font-display italic text-[var(--color-ink-soft)] inline-block animate-[settleIn_900ms_320ms_cubic-bezier(0.2,0.7,0.2,1)_both]"
-          >
-            Render typed components
-          </span>
-          <span className="inline-block animate-[fadeUp_700ms_540ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
-            {' '}instead of text walls.
-          </span>
-        </h1>
+        {demoMode ? (
+          <h1 className="mt-4 text-[clamp(34px,5vw,52px)] leading-[1.04] tracking-[-0.02em] text-[var(--color-ink)]">
+            <span className="inline-block animate-[fadeUp_700ms_120ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+              Same model, same data.{' '}
+            </span>
+            <span className="font-display italic text-[var(--color-ink-soft)] inline-block animate-[settleIn_900ms_320ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+              Two responses
+            </span>
+            <span className="inline-block animate-[fadeUp_700ms_540ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+              {' '}side by side.
+            </span>
+          </h1>
+        ) : (
+          <h1 className="mt-4 text-[clamp(34px,5vw,52px)] leading-[1.04] tracking-[-0.02em] text-[var(--color-ink)]">
+            <span className="inline-block animate-[fadeUp_700ms_120ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+              Talk to your ad data.{' '}
+            </span>
+            <span className="font-display italic text-[var(--color-ink-soft)] inline-block animate-[settleIn_900ms_320ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+              Render typed components
+            </span>
+            <span className="inline-block animate-[fadeUp_700ms_540ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
+              {' '}instead of text walls.
+            </span>
+          </h1>
+        )}
         <p className="mt-5 text-[15px] leading-relaxed text-[var(--color-ink-muted)] max-w-[58ch] animate-[fadeUp_700ms_680ms_cubic-bezier(0.2,0.7,0.2,1)_both]">
-          Pick a sample export below. The agent normalizes the CSV into a canonical schema,
-          then composes a report by calling React components as tools — only the ones that
-          actually answer your question.
+          {demoMode
+            ? 'Pick a sample below. The same query fires to both panes — on the left, a plain Claude response with markdown tables and prose; on the right, the gen-1 agent rendering typed React components.'
+            : 'Pick a sample export below. The agent normalizes the CSV into a canonical schema, then composes a report by calling React components as tools — only the ones that actually answer your question.'}
         </p>
       </div>
 

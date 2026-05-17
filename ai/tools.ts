@@ -7,7 +7,7 @@ import { adaptCampaignData } from '@/connectors';
 import { loadDatasetFromUrl } from '@/connectors/url-fetcher';
 import { profileRows } from '@/lib/profiler';
 import { putDataset, getDatasetById, type LoadedDataset } from '@/lib/dataset-store';
-import { queryCampaigns, type QueryRequest, type QueryResult } from '@/lib/query';
+import { aggregate, bucketBy, queryCampaigns, type QueryRequest, type QueryResult } from '@/lib/query';
 import { DATASET_CATALOG, getDataset } from '@/lib/dataset-catalog';
 import { traceEvent } from '@/lib/agent-trace';
 import type { Campaign } from '@/connectors/schemas';
@@ -59,28 +59,6 @@ function dateRange(rows: Campaign[]): { start: string; end: string; days: number
   const dates = rows.map((row) => row.date).filter((v): v is string => !!v).sort();
   if (dates.length === 0) return undefined;
   return { start: dates[0], end: dates[dates.length - 1], days: new Set(dates).size };
-}
-
-function aggregate(rows: Campaign[]) {
-  let impressions = 0, clicks = 0, spend = 0, conversions = 0, revenue = 0;
-  for (const row of rows) {
-    impressions += row.impressions ?? 0;
-    clicks += row.clicks ?? 0;
-    spend += row.spend ?? 0;
-    conversions += row.conversions ?? 0;
-    revenue += row.revenue ?? 0;
-  }
-  return {
-    impressions,
-    clicks,
-    spend,
-    conversions,
-    revenue,
-    ctr: impressions > 0 ? clicks / impressions : 0,
-    cpc: clicks > 0 ? spend / clicks : 0,
-    cpm: impressions > 0 ? spend / (impressions / 1000) : 0,
-    roas: spend > 0 ? revenue / spend : 0,
-  };
 }
 
 function buildLoadSummary(dataset: LoadedDataset) {
@@ -225,31 +203,20 @@ export const tools = {
         if (dated.length === 0) {
           return { toolError: 'No date column in this dataset — cannot render a time series.' } as const;
         }
-        const seriesMap = new Map<string, Map<string, ReturnType<typeof aggregate>>>();
-        for (const row of dated) {
-          const seriesKey = breakdownBy ? String(row[breakdownBy] ?? 'Other') : 'all';
-          const dateKey = row.date!;
-          if (!seriesMap.has(seriesKey)) seriesMap.set(seriesKey, new Map());
-          const dateMap = seriesMap.get(seriesKey)!;
-          const existing = dateMap.get(dateKey);
-          const acc = existing ?? { impressions: 0, clicks: 0, spend: 0, conversions: 0, revenue: 0, ctr: 0, cpc: 0, cpm: 0, roas: 0 };
-          acc.impressions += row.impressions ?? 0;
-          acc.clicks += row.clicks ?? 0;
-          acc.spend += row.spend ?? 0;
-          acc.conversions += row.conversions ?? 0;
-          acc.revenue += row.revenue ?? 0;
-          acc.ctr = acc.impressions > 0 ? acc.clicks / acc.impressions : 0;
-          acc.cpc = acc.clicks > 0 ? acc.spend / acc.clicks : 0;
-          acc.cpm = acc.impressions > 0 ? acc.spend / (acc.impressions / 1000) : 0;
-          acc.roas = acc.spend > 0 ? acc.revenue / acc.spend : 0;
-          dateMap.set(dateKey, acc);
-        }
-        const series = Array.from(seriesMap.entries()).map(([name, dateMap]) => ({
-          name,
-          points: Array.from(dateMap.entries())
-            .map(([date, agg]) => ({ date, value: agg[metric] }))
-            .sort((a, b) => a.date.localeCompare(b.date)),
-        }));
+        // Two-level bucketing: first by series, then per-series by date. Each leaf bucket
+        // is aggregated exactly once and we only read the requested metric from the totals.
+        const seriesBuckets = bucketBy(dated, (row) =>
+          breakdownBy ? String(row[breakdownBy] ?? 'Other') : 'all',
+        );
+        const series = Array.from(seriesBuckets.entries()).map(([name, seriesRows]) => {
+          const dateBuckets = bucketBy(seriesRows, (row) => row.date!);
+          return {
+            name,
+            points: Array.from(dateBuckets.entries())
+              .map(([date, rowsForDate]) => ({ date, value: aggregate(rowsForDate)[metric] }))
+              .sort((a, b) => a.date.localeCompare(b.date)),
+          };
+        });
         return { datasetId, metric, breakdownBy: breakdownBy ?? null, series };
       }),
   }),
@@ -266,13 +233,7 @@ export const tools = {
     }),
     execute: async ({ datasetId, dimension, metric, limit }) =>
       withDataset(datasetId, (dataset) => {
-        const buckets = new Map<string, Campaign[]>();
-        for (const row of dataset.rows) {
-          const key = String(row[dimension] ?? 'Unspecified');
-          const list = buckets.get(key) ?? [];
-          list.push(row);
-          buckets.set(key, list);
-        }
+        const buckets = bucketBy(dataset.rows, (row) => String(row[dimension] ?? 'Unspecified'));
         const result = Array.from(buckets.entries()).map(([label, rows]) => ({ label, ...aggregate(rows) }));
         result.sort((a, b) => (b as unknown as Record<string, number>)[metric] - (a as unknown as Record<string, number>)[metric]);
         return {
@@ -298,13 +259,7 @@ export const tools = {
         if (audienceRows.length === 0) {
           return { toolError: 'This dataset has no audience column — call showBreakdown instead.' } as const;
         }
-        const buckets = new Map<string, Campaign[]>();
-        for (const row of audienceRows) {
-          const key = String(row.audienceName);
-          const list = buckets.get(key) ?? [];
-          list.push(row);
-          buckets.set(key, list);
-        }
+        const buckets = bucketBy(audienceRows, (row) => String(row.audienceName));
         const cards = Array.from(buckets.entries()).map(([label, rows]) => ({ label, ...aggregate(rows) }));
         cards.sort((a, b) => b.impressions - a.impressions);
         return { datasetId, cards: cards.slice(0, 12) };

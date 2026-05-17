@@ -25,6 +25,45 @@ These four ideas, executed together, make the difference between a chatbot that 
 
 ---
 
+## Why the arithmetic lives in TypeScript
+
+A reasonable question: if the agent already has access to the rows, why not let the model do the math? Hand it the dataset, ask for ROAS by audience, let it sum and divide. Modern models can do arithmetic. Why a query engine at all?
+
+`lib/query.ts` is that engine. It's about 150 lines of pure, dependency-free TypeScript — one function, `queryCampaigns(rows, request)`, that takes the normalized `Campaign[]` rows and a typed `QueryRequest` and returns a typed `QueryResult`. No LLM is in the loop. The reasons it has to be this way, in order of stakes:
+
+**1. Determinism.** `queryCampaigns()` is a pure function. Same rows, same request, byte-identical result. The audience tile shows the same number on every render, and the prose interpretation the model writes is grounded in numbers the user is staring at on the same page. With model-in-the-loop math, the same query at temperature > 0 can return `$4.21` and `$4.18` on consecutive calls. Even at temperature 0, an extra whitespace token earlier in the prompt can shift the third digit. For analytics, that isn't a rounding error — it's a credibility problem.
+
+**2. Cost and accuracy ceiling.** Aggregating CTR over 50,000 rows in JavaScript is on the order of milliseconds and a few KB of memory. The same operation through a model means shipping all 50,000 rows as input tokens, paying for the working tokens to sum them, and accepting whatever multi-digit-arithmetic accuracy frontier models hit at that scale — which is well below 100%. The engine sidesteps all three concerns:
+
+- The model never sees more than a 25-row preview. The `toModelOutput` hook on `queryDataset` (`ai/tools.ts:360-367`) clips `result.rows` to `ROWS_VISIBLE_TO_MODEL` before serialization, so the dataset size is decoupled from the context window. The widget receives the full result; the model receives the head.
+- The digits the user reads are computed by the host runtime, not generated token-by-token.
+- Adding a 200,000-row CSV doesn't change the model bill — it changes the size of an in-memory `Campaign[]`.
+
+**3. Aggregate-then-rate, not rate-then-aggregate.** This is the subtle one and it's where LLM-computed numbers most often go wrong without anyone noticing. If you give a model a table of per-row CTR values and ask for "overall CTR," the most natural thing it can do is average them. That answer is wrong. The correct overall CTR is `total_clicks / total_impressions` — a click-weighted ratio, not an unweighted mean of ratios. `toQueryRow()` always sums the base metrics first, then derives the rates from the totals, with explicit zero-denominator guards:
+
+```ts
+ctr: impressions > 0 ? clicks / impressions : 0,
+cpc: clicks > 0 ? spend / clicks : 0,
+cpm: impressions > 0 ? spend / (impressions / 1000) : 0,
+roas: spend > 0 ? revenue / spend : 0,
+```
+
+The CPM line is the one models reliably get wrong inline — dropping the `/ 1000`, flipping numerator and denominator, or quietly using "CPM" to mean cost-per-thousand-clicks. Pinning it to one canonical formula in one place removes a class of silent errors that "give the agent the data" can't.
+
+**The split, in one sentence.** The model emits a typed query (`{ groupBy: ['audienceName'], metrics: ['conversions','spend','roas'], sortBy: 'roas', sortDir: 'desc', limit: 5 }`); the engine resolves it. Intent and execution are cleanly separated. The model never writes a `SUM`, never computes a ratio, never walks the long tail of rows. It picks the slice; the engine returns exact numbers in a stable, typed shape.
+
+A few engineering details fall out of that split:
+
+- **Bounded query DSL.** Nine metrics, ten group keys, seven filter operators (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`). The model is selecting from an enumerated set — Zod validates the entire `QueryRequest` at the tool boundary (`ai/tools.ts:347-359`), so it can't accidentally request `SUM(price * 2.3)` and have a silent partial match. Any invalid shape is rejected before a single row is touched.
+- **Empty-result honesty.** When filters match no rows, the engine returns `rows: []` and `totalGroups: 0` — not a single fake all-zeros rollup (`lib/query.ts:64-79`). The system prompt teaches the model to surface "your filter matched nothing" rather than confidently quote `$0.00`. This is the single most common way "let the model compute it" fails closed: an all-zero answer that looks like a real answer.
+- **Group-key derivation is consistent.** `groupBy` uses an enum of canonical fields. The cache key for buckets is the concatenation of group values, so a `['channel','date']` query and a `['date','channel']` query produce structurally equivalent buckets — there's no ordering ambiguity for the model to trip over.
+- **Widgets receive numbers, not strings.** `QueryResult` is fully typed. There's no locale-formatted `"$1,234.56"` the model invented and the widget then had to re-parse. Formatting is a render concern, owned by `lib/format.ts`; numerical truth is a query-engine concern. The two never collide.
+- **One set of formulas, applied at every site.** `tool-queryDataset` routes through `toQueryRow()` in `lib/query.ts`; the `show*` widget tools route through a sibling `aggregate()` in `ai/tools.ts`; `showTimeSeries` has its own inline per-date accumulator. All three implement the same five base sums and the same four derived-rate expressions (`ctr`, `cpc`, `cpm`, `roas`) with identical zero-denominator guards. The duplication is deliberate-for-now and small — each site is under twenty lines — but it's the obvious next consolidation: a single `aggregate(rows)` primitive that all four call sites import. If you fork this repo and extend it, that's the refactor to do first.
+
+Net effect: the LLM does what LLMs are good at — picking the right cut, choosing the right widget, narrating the result in two sentences — and the engine does what engines are good at — exact, fast, deterministic math over typed rows. The Demo Mode toggle in the UI makes this contrast concrete: the same model, the same dataset, fired into both panes; the left does its own arithmetic in prose and the right delegates to the engine and renders. The numbers on the right are reproducible. The numbers on the left, you have to take on faith.
+
+---
+
 ## Built for the advertising community
 
 Six of the seven major platforms an analyst actually deals with — Meta, Google, DV360, CM360, The Trade Desk, Amazon — ship with their own column naming conventions, their own units (Google in micros, Meta in dollars, DV360 in advertiser currency), their own date formats, and their own grain (campaign / ad group / line item / placement / creative / audience). Normalizing across them is the unglamorous work that every ad-ops engineer has reimplemented at least three times.

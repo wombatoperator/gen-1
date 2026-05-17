@@ -5,6 +5,26 @@ import { createRequestId, traceEvent, withAgentTrace } from '@/lib/agent-trace';
 
 export const maxDuration = 60;
 
+const SYSTEM_PROMPT_TEXT = `You are an advertising data analyst answering in plain text — like a standard chatbot, with no UI components available.
+
+You have only data-access tools:
+- listDatasets — list available datasets.
+- loadDataset({ id | url }) — normalize a dataset and cache it. Returns shape only.
+- queryDataset({ datasetId, groupBy?, metrics?, filters?, sortBy?, sortDir?, limit? }) — aggregate the rows.
+
+You do NOT have any chart, widget, or display tools. Everything you communicate must be in your text response.
+
+WORKFLOW
+1. If the user names a dataset, call loadDataset first.
+2. Use queryDataset to pull the numbers you need to answer the question — totals, breakdowns, top-N, trends, etc. You may call it multiple times for different cuts.
+3. Then write a thorough prose answer.
+
+WRITING STYLE
+- Write a detailed, quantitative analysis in prose. Quote the numbers from queryDataset.
+- Markdown formatting is fine and encouraged: use ## section headings, bullet lists, and markdown tables to organize the answer when helpful.
+- For trends or breakdowns, include the actual numbers in your prose or as a markdown table — there are no charts to lean on.
+- Be the kind of response a generic LLM chatbot would produce for an advertising question: complete, structured, somewhat lengthy.`;
+
 const SYSTEM_PROMPT = `You are an advertising data analyst. You answer questions by calling tools — never by inventing numbers or guessing.
 
 You have three categories of tools.
@@ -48,24 +68,36 @@ If a tool returns { toolError }, surface the cause in one sentence and propose t
 
 export async function POST(req: Request) {
   const requestId = createRequestId();
-  const { messages }: { messages: UIMessage[] } = await req.json();
+  const body: { messages: UIMessage[]; mode?: 'ui' | 'text' } = await req.json();
+  const { messages } = body;
+  const mode = body.mode === 'text' ? 'text' : 'ui';
   const lastMessage = messages.at(-1);
   const lastText = lastMessage?.parts.find((p) => p.type === 'text')?.text ?? '';
-  console.log(`[chat:${requestId}] ← user: "${String(lastText).slice(0, 80)}"`);
+  console.log(`[chat:${requestId}] ← user (${mode}): "${String(lastText).slice(0, 80)}"`);
 
   const modelMessages = await convertToModelMessages(messages);
+
+  const activeTools =
+    mode === 'text'
+      ? {
+          listDatasets: tools.listDatasets,
+          loadDataset: tools.loadDataset,
+          queryDataset: tools.queryDataset,
+        }
+      : tools;
+  const systemPrompt = mode === 'text' ? SYSTEM_PROMPT_TEXT : SYSTEM_PROMPT;
 
   const result = withAgentTrace(requestId, () =>
     streamText({
       model: anthropic('claude-sonnet-4-6'),
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: modelMessages,
       stopWhen: stepCountIs(10),
-      tools,
+      tools: activeTools,
       experimental_telemetry: {
         isEnabled: true,
         functionId: 'ad-data-agent-chat',
-        metadata: { requestId },
+        metadata: { requestId, mode },
       },
       onChunk({ chunk }) {
         if (chunk.type === 'tool-call') {
