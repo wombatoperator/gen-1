@@ -4,6 +4,40 @@
 
 This repo is a working reference implementation of a simple idea: in a chat with an AI, the *components* should be the output medium. Words are the footnote.
 
+### What that looks like in practice
+
+```
+┌─ user ──────────────────────────────────────────────────────────────┐
+│  How did the Meta campaign perform last week, and which audiences   │
+│  converted cheapest?                                                │
+└─────────────────────────────────────────────────────────────────────┘
+
+  agent → loadDataset({ id: "meta-insights-adset" })
+  agent → showKpiStrip({ datasetId })
+  agent → showTimeSeries({ datasetId, metric: "spend", breakdownBy: "channel" })
+  agent → showAudienceMix({ datasetId })
+  agent → queryDataset({ groupBy: ["audienceName"], metrics: ["conversions","cpc"],
+                         sortBy: "cpc", sortDir: "asc", limit: 5 })
+
+┌─ Totals · Meta Insights ─────────────────────────────────────────────┐
+│  IMPRESSIONS    CLICKS       SPEND        CTR         CPC      CPM   │
+│  ▎ 8.4M         ▎ 412K       ▎ $187K      ▎ 4.91%     ▎ $0.45  ▎ $22 │
+│   blue           blue         orange       teal        orange   orng │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ Trend · spend · split by channel ───────────────────────────────────┐
+│   $14K ┤                                ╭─╮      instagram_reels    │
+│        │                          ╭─────╯ ╰╮     instagram_stories  │
+│   $10K ┤                  ╭──╮ ╭──╯        ╰──╮  audience_network   │
+│        │           ╭──╮ ╭─╯  ╰─╯              ╰╮                    │
+│    $6K ┤  ╭────────╯  ╰─╯                      ╰─                   │
+│        └──┴────┬────┬────┬────┬────┬────┬────┬────                   │
+│                11/03  11/10  11/17  11/24  12/01                     │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+The user sees real widgets — animated KPI cards, Recharts area/line charts, audience tiles, a CTR-vs-CPC scatter. The model writes two sentences of interpretation underneath, in proper markdown. The numbers in the widgets are computed by a pure TypeScript engine, not by the model.
+
 ---
 
 ## The philosophy
@@ -17,8 +51,61 @@ The point of giving an LLM tools is that **tools are the interface**, not just t
 That changes how you write the prompt, how you structure the tools, and how the UI is composed:
 
 - **One tool, one component.** Every render-tool — `showKpiStrip`, `showTimeSeries`, `showBreakdown`, `showAudienceMix`, `showEfficiencyMap` — corresponds to exactly one React component. Adding a new visualization is one component plus one tool definition. The agent composes the dashboard at call time, in whatever order makes sense for the user's question.
+
+  ```ts
+  // ai/tools.ts — the tool the model sees
+  showBreakdown: tool({
+    description:
+      'Show top N buckets for a dimension as a horizontal bar chart, sorted by the chosen metric. ' +
+      'Use to compare channels, ad groups, creatives, placements, or audiences.',
+    inputSchema: z.object({
+      datasetId: z.string(),
+      dimension: breakdownDimensionEnum,
+      metric:    metricEnum.default('spend'),
+      limit:     z.number().int().positive().max(20).default(8),
+    }),
+    execute: async ({ datasetId, dimension, metric, limit }) => /* …pure aggregation… */,
+  }),
+  ```
+
+  ```tsx
+  // components/widgets/BreakdownWidget.tsx — the one component that renders it
+  <BreakdownWidget data={result} />
+  ```
+
 - **Chrome stays neutral, color belongs to the data.** Every metric has a fixed semantic color across every widget. Impressions are blue. Spend is orange. Conversions are green. CPC outliers are red. You learn the mapping once and it works everywhere — the discipline Apple's Health, Stocks, and Numbers apps quietly enforce.
+
+  ```
+  impressions  ▇▇▇  blue        ctr   ▇▇▇  teal
+  clicks       ▇▇▇  indigo      cpc   ▇▇▇  orange (red when high)
+  spend        ▇▇▇  orange      cpm   ▇▇▇  orange
+  conversions  ▇▇▇  green       roas  ▇▇▇  green
+  ```
+
 - **Deterministic where possible, AI where necessary.** Mapping a Meta export to a canonical schema does not require an LLM call. A registry of per-platform column aliases does it for free, instantly, every time. The model only steps in for the messy headers the registry doesn't know — and only when required fields are still unmapped after the deterministic pass. The result is cached by header signature so the same CSV shape never re-incurs the cost.
+
+  ```
+       raw CSV header                       canonical field
+       ───────────────────────────────────────────────────────
+       impressions                ─────►   impressions
+       inline_link_clicks         ─────►   clicks
+       spend                      ─────►   spend
+       cpm                        ─────►   cpm
+       purchases                  ─────►   conversions
+       date_start                 ─────►   date          (ISO transform)
+       publisher_platform         ─────►   channel
+       adset_name                 ─────►   audienceName
+
+                  ┌────────────────────────────┐
+       headers ─► │  field-registry  (no LLM)  │ ─► mapped? done.
+                  └────────────────────────────┘
+                           │ unmapped required fields?
+                           ▼
+                  ┌────────────────────────────┐
+                  │  LLM fallback  +  cache    │ ─► mapped, cached forever.
+                  └────────────────────────────┘
+  ```
+
 - **The agent never invents numbers.** When the user asks "which audience converts cheapest?", the agent calls `queryDataset` against the normalized rows. The aggregation engine is pure TypeScript with no LLM in the loop. The model's answer is grounded in the same data the user sees.
 
 These four ideas, executed together, make the difference between a chatbot that *describes* a dashboard and a chat interface that *is* one.
@@ -52,6 +139,41 @@ The CPM line is the one models reliably get wrong inline — dropping the `/ 100
 
 **The split, in one sentence.** The model emits a typed query (`{ groupBy: ['audienceName'], metrics: ['conversions','spend','roas'], sortBy: 'roas', sortDir: 'desc', limit: 5 }`); the engine resolves it. Intent and execution are cleanly separated. The model never writes a `SUM`, never computes a ratio, never walks the long tail of rows. It picks the slice; the engine returns exact numbers in a stable, typed shape.
 
+```ts
+// what the model emits — a typed, Zod-validated request
+const request: QueryRequest = {
+  datasetId: 'meta-insights-adset',
+  groupBy:   ['audienceName'],
+  metrics:   ['conversions', 'spend', 'cpc', 'roas'],
+  filters:   [{ field: 'channel', op: 'eq', value: 'instagram' }],
+  sortBy:    'cpc',
+  sortDir:   'asc',
+  limit:     5,
+};
+
+// what queryCampaigns(rows, request) returns — pure, deterministic, typed
+const result: QueryResult = {
+  totalGroups: 14,
+  rows: [
+    { audienceName: 'Lookalike 2pct',     conversions: 1659, spend: 18034.72, cpc: 0.73, roas: 4.21 },
+    { audienceName: 'Purchasers 180d',    conversions: 1675, spend: 12597.35, cpc: 0.41, roas: 5.18 },
+    { audienceName: 'Cart Abandoners 7d', conversions:  845, spend:  4820.76, cpc: 0.28, roas: 3.92 },
+    // …two more rows…
+  ],
+};
+```
+
+```
+┌─ Top 5 audiences · cheapest CPC ─────────────────────────────────────┐
+│  Purchasers 180d    ████████████████████████████████  CPC $0.41      │
+│  Cart Abandoners 7d ███████████████████████           CPC $0.28      │
+│  Lookalike 2pct     ██████████████████                CPC $0.73      │
+│  Broad - Interests  ███████████                       CPC $0.92      │
+│  Loyalty High Int.  ████████                          CPC $1.14      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+
 A few engineering details fall out of that split:
 
 - **Bounded query DSL.** Nine metrics, ten group keys, seven filter operators (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`). The model is selecting from an enumerated set — Zod validates the entire `QueryRequest` at the tool boundary (`ai/tools.ts:347-359`), so it can't accidentally request `SUM(price * 2.3)` and have a silent partial match. Any invalid shape is rejected before a single row is touched.
@@ -76,6 +198,36 @@ We hope teams that want a starting point for internal analyst tools, agencies th
 
 ## Composability is the contract
 
+```
+                CSV upload  /  fixture URL
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │   connectors/  · field-registry +   │   deterministic, cached
+        │   schema-adapter  · per-platform    │   per header signature
+        │   aliases, transforms, grain        │
+        └─────────────────────────────────────┘
+                          │  Campaign[] (canonical, typed)
+                          ▼
+        ┌─────────────────────────────────────┐
+        │   lib/query.ts  ·  queryCampaigns() │   pure TypeScript,
+        │   groupBy · filters · metrics ·     │   no LLM in the loop
+        │   aggregate-then-rate               │
+        └─────────────────────────────────────┘
+                          │  QueryResult (typed rows)
+                          ▼
+        ┌─────────────────────────────────────┐
+        │   ai/tools.ts  ·  show* + query     │   one tool ↔ one widget
+        │   tools exposed to the AI SDK       │   model picks; engine resolves
+        └─────────────────────────────────────┘
+                          │  streamed tool parts
+                          ▼
+        ┌─────────────────────────────────────┐
+        │   components/widgets/*  ·  Recharts │   semantic per-metric palette
+        │   + neutral chrome · countup anim   │   rendered into the chat
+        └─────────────────────────────────────┘
+```
+
 The repo is organized so that the three things you most often want to do are each a small, focused change:
 
 | What | Where | Cost |
@@ -99,6 +251,36 @@ Nothing is hidden behind a framework. The chat route is a single file. The tool 
 - **A query engine** with groupBy, filters, metrics, sorting, and derived rates (CTR, CPC, CPM, ROAS).
 - **Six display widgets** built on Recharts with a semantic per-metric palette.
 - **A chat shell** that uses AI SDK v6's typed tool parts, streams components as the agent calls them, and renders short prose interpretation in proper markdown.
+
+### The six widgets, at a glance
+
+```
+KpiStrip                                 TimeSeries
+┌─────────────────────────────┐          ┌─────────────────────────────┐
+│ IMPR    CLICKS  SPEND  CTR  │          │ ╱╲      ╱╲╱╲       ╱        │
+│ 8.4M    412K    $187K  4.9% │          │╱  ╲    ╱    ╲   ╱╲╱         │
+│ blue    blue    orange teal │          │    ╲╱╲╱      ╲╱            │
+└─────────────────────────────┘          └─────────────────────────────┘
+   totals · countup animation              daily trend · area or split lines
+
+Breakdown                                AudienceMix
+┌─────────────────────────────┐          ┌─────────┬─────────┬─────────┐
+│ instagram_reels   ████████  │          │ Lookalk │ Purch.  │ Cart    │
+│ stories          ██████     │          │ 38%     │ 27%     │ 14%     │
+│ audience_network ████       │          │ CTR 4.8 │ CTR 6.6 │ CTR 4.6 │
+│ feed             ███        │          └─────────┴─────────┴─────────┘
+└─────────────────────────────┘           audience share tiles
+
+EfficiencyMap                            QueryResult
+┌─ CPC ▲  (lower-right = good) ┐         ┌─ Top 5 by ROAS ─────────────┐
+│   ●                          │         │ audienceName    roas   spend│
+│      ●  ●                    │         │ Purchasers 180  5.18  $12.6K│
+│         ●   ●  ● ●           │         │ Lookalike 2pct  4.21  $18.0K│
+│            ●  ● ● ●●  CTR ►  │         │ Cart Aband. 7d  3.92   $4.8K│
+└──────────────────────────────┘         └─────────────────────────────┘
+   bubble = spend · red = inefficient      typed rows · sortable · capped
+```
+
 
 ---
 
